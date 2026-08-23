@@ -66,7 +66,19 @@ To build the release APK locally:
 3. Toggle the **Enable Accessibility Service** switch.
 4. Read the prominent Accessibility Service Disclosure and tap **Proceed to Settings**.
 5. In Android System Accessibility Settings, locate **Auto Focus for Telegram Service** and toggle it **ON**.
-6. Open any chat in standard **Telegram** (`org.telegram.messenger`) or **Telegram X** (`org.telegram.messenger.web`). The input box will automatically receive focus and raise the keyboard.
+6. Open any chat in standard **Telegram** (`org.telegram.messenger`) or **Telegram X** (`org.telegram.messenger.web`). The input box will automatically receive focus and raise the keyboard instantly.
+
+---
+
+## Handling Google Play Protect Warnings During Sideloading
+
+When sideloading newly compiled APKs that are not downloaded directly from the Google Play Store, **Google Play Protect** may display a warning dialog saying *"Blocked by Play Protect"* or *"Unrecognised Developer"*. This is standard behavior for custom self-signed APKs because Play Protect has no historical reputation data for the developer certificate.
+
+### How to Bypass the Sideload Warning:
+1. When the Play Protect prompt appears during installation:
+2. Tap **More details** (or **Advanced**).
+3. Tap **Install anyway (unsafe)** to proceed with the installation.
+4. If Play Protect prompts to scan the app after installation, you may select **Don't send**.
 
 ---
 
@@ -116,7 +128,7 @@ Go to **Settings > Secrets and variables > Actions** in your GitHub repository a
    ```
 3. The `.github/workflows/release.yml` pipeline will automatically:
    - Build and sign `app-release.apk` using your configured secrets.
-   - Create a GitHub Release for tag `v1.0.0`.
+   - Create a GitHub Release for tag `v1.0.0` (or auto-generate tag `v1.0.<build_number>` on `workflow_dispatch`).
    - Upload `app-release.apk` as a release asset.
 4. Alternatively, you can trigger the build manually from the **Actions** tab on GitHub using `workflow_dispatch`.
 
