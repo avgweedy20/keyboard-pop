@@ -1,0 +1,19 @@
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <string name="app_name">Auto Focus for Telegram</string>
+    <string name="accessibility_service_label">Auto Focus for Telegram Service</string>
+
+    <string name="app_description">Auto Focus for Telegram automatically focuses the message input field and raises the soft keyboard as soon as you open any chat in Telegram.</string>
+    <string name="service_status_enabled">Accessibility Service: Enabled</string>
+    <string name="service_status_disabled">Accessibility Service: Disabled</string>
+    <string name="button_enable_service">Enable Accessibility Service</string>
+    <string name="button_open_settings">Open Accessibility Settings</string>
+
+    <string name="telegram_status_checking">Checking Telegram installation…</string>
+    <string name="telegram_status_installed">Telegram is installed on this device.</string>
+    <string name="telegram_status_not_installed">Telegram (org.telegram.messenger or Telegram X) is not installed on this device.</string>
+
+    <string name="disclosure_title">Accessibility Service Disclosure</string>
+    <string name="disclosure_message">Auto Focus for Telegram requires the Accessibility Service permission to observe when you open a chat in Telegram and automatically trigger input field focus and soft keyboard display.\n\nThis app does not read, store, or transmit any message contents or personal data. It only inspects UI layout elements within Telegram to detect chat input fields.</string>
+    <string name="disclosure_accept">Proceed to Settings</string>
+    <string name="disclosure_decline">Cancel</string>
+</resources>
