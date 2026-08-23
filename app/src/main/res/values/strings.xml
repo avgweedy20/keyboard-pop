@@ -8,6 +8,9 @@
     <string name="button_enable_service">Enable Accessibility Service</string>
     <string name="button_open_settings">Open Accessibility Settings</string>
 
+    <string name="response_time_label">Last response time: %s</string>
+    <string name="response_time_none">Last response time: No events yet</string>
+
     <string name="telegram_status_checking">Checking Telegram installation…</string>
     <string name="telegram_status_installed">Telegram is installed on this device.</string>
     <string name="telegram_status_not_installed">Telegram (org.telegram.messenger or Telegram X) is not installed on this device.</string>
