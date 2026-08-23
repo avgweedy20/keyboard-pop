@@ -9,7 +9,7 @@ import android.text.TextUtils
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import com.autofocus.telegram.databinding.ActivityMainBinding
-import com.google.android.material.materialswitch.MaterialSwitch
+import java.util.Locale
 
 class MainActivity : AppCompatActivity() {
 
@@ -39,11 +39,9 @@ class MainActivity : AppCompatActivity() {
         binding.switchService.setOnCheckedChangeListener { _, isChecked ->
             val serviceEnabled = isAccessibilityServiceEnabled(this, TelegramFocusAccessibilityService::class.java)
             if (isChecked && !serviceEnabled) {
-                // Reset switch silently until enabled in settings
                 binding.switchService.isChecked = false
                 showDisclosureDialog()
             } else if (!isChecked && serviceEnabled) {
-                // Deep link to accessibility settings so user can disable it
                 openAccessibilitySettings()
             }
         }
@@ -56,7 +54,6 @@ class MainActivity : AppCompatActivity() {
     private fun updateUiState() {
         val serviceEnabled = isAccessibilityServiceEnabled(this, TelegramFocusAccessibilityService::class.java)
 
-        // Temporarily remove listener to avoid recursion when updating state programmatically
         binding.switchService.setOnCheckedChangeListener(null)
         binding.switchService.isChecked = serviceEnabled
         setupListeners()
@@ -65,6 +62,13 @@ class MainActivity : AppCompatActivity() {
             getString(R.string.service_status_enabled)
         } else {
             getString(R.string.service_status_disabled)
+        }
+
+        val lastTime = TelegramFocusAccessibilityService.lastResponseTimeMs
+        if (lastTime != null) {
+            binding.tvResponseTime.text = getString(R.string.response_time_label, String.format(Locale.US, "%.1f ms", lastTime))
+        } else {
+            binding.tvResponseTime.text = getString(R.string.response_time_none)
         }
 
         checkTelegramInstalled()

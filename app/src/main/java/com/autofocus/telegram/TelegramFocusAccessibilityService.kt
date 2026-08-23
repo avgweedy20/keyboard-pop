@@ -8,11 +8,15 @@ import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import android.view.inputmethod.InputMethodManager
+import java.util.Locale
 
 class TelegramFocusAccessibilityService : AccessibilityService() {
 
     companion object {
         private const val TAG = "TelegramFocusService"
+
+        @Volatile
+        var lastResponseTimeMs: Double? = null
 
         // Likely resource IDs for Telegram message input box
         private val INPUT_RESOURCE_IDS = listOf(
@@ -34,10 +38,11 @@ class TelegramFocusAccessibilityService : AccessibilityService() {
         val packageName = event.packageName?.toString() ?: return
         if (packageName !in MainActivity.TELEGRAM_PACKAGES) return
 
+        val startTimeNano = System.nanoTime()
         val rootNode = rootInActiveWindow ?: return
 
         try {
-            processWindow(rootNode)
+            processWindow(rootNode, startTimeNano)
         } catch (e: Exception) {
             Log.e(TAG, "Error processing accessibility event safely", e)
         } finally {
@@ -50,7 +55,7 @@ class TelegramFocusAccessibilityService : AccessibilityService() {
         Log.i(TAG, "Service interrupted")
     }
 
-    private fun processWindow(rootNode: AccessibilityNodeInfo) {
+    private fun processWindow(rootNode: AccessibilityNodeInfo, startTimeNano: Long) {
         val isChatScreen = isChatConversationScreen(rootNode)
 
         if (!isChatScreen) {
@@ -78,6 +83,10 @@ class TelegramFocusAccessibilityService : AccessibilityService() {
             performFocusAndKeyboardTrigger(inputNode)
             @Suppress("DEPRECATION")
             inputNode.recycle()
+
+            val elapsedMs = (System.nanoTime() - startTimeNano) / 1_000_000.0
+            lastResponseTimeMs = elapsedMs
+            Log.d(TAG, "Auto-focus response time: ${String.format(Locale.US, "%.2f ms", elapsedMs)}")
         } else {
             Log.d(TAG, "Chat screen signature detected, but no EditText input node found.")
         }
