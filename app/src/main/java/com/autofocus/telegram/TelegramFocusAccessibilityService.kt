@@ -72,7 +72,7 @@ class TelegramFocusAccessibilityService : AccessibilityService() {
 
         val inputNode = findMessageInputNode(rootNode)
         if (inputNode != null) {
-            Log.d(TAG, "Chat screen detected. Focusable input found. Executing auto-focus...")
+            Log.d(TAG, "Chat screen detected. Focusable input found. Executing instant auto-focus...")
             lastHandledChatSignature = currentSignature
 
             performFocusAndKeyboardTrigger(inputNode)
@@ -184,25 +184,33 @@ class TelegramFocusAccessibilityService : AccessibilityService() {
     }
 
     /**
-     * Performs click & focus accessibility actions and triggers soft keyboard fallback.
+     * Instantly performs click & focus accessibility actions and triggers soft keyboard display immediately.
      */
     private fun performFocusAndKeyboardTrigger(node: AccessibilityNodeInfo) {
-        val clickSuccess = node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+        // Execute instant accessibility actions
         val focusSuccess = node.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
-        Log.d(TAG, "ACTION_CLICK result: $clickSuccess, ACTION_FOCUS result: $focusSuccess")
+        val clickSuccess = node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+        Log.d(TAG, "Instant ACTION_FOCUS result: $focusSuccess, ACTION_CLICK result: $clickSuccess")
 
-        // Beat delay fallback for soft keyboard display
+        // Immediately trigger keyboard display without delay
+        triggerSoftKeyboard()
+
+        // Fast follow-up (30ms) to guarantee keyboard display across all device/launcher configurations
         mainHandler.postDelayed({
-            try {
-                @Suppress("DEPRECATION")
-                val imm = getSystemService(INPUT_METHOD_SERVICE) as? InputMethodManager
-                @Suppress("DEPRECATION")
-                imm?.toggleSoftInput(InputMethodManager.SHOW_FORCED, InputMethodManager.HIDE_IMPLICIT_ONLY)
-                Log.d(TAG, "InputMethodManager.toggleSoftInput triggered as keyboard fallback")
-            } catch (e: Exception) {
-                Log.e(TAG, "Error executing soft keyboard fallback trigger", e)
-            }
-        }, 150)
+            triggerSoftKeyboard()
+        }, 30)
+    }
+
+    private fun triggerSoftKeyboard() {
+        try {
+            @Suppress("DEPRECATION")
+            val imm = getSystemService(INPUT_METHOD_SERVICE) as? InputMethodManager
+            @Suppress("DEPRECATION")
+            imm?.toggleSoftInput(InputMethodManager.SHOW_FORCED, InputMethodManager.HIDE_IMPLICIT_ONLY)
+            Log.d(TAG, "InputMethodManager.toggleSoftInput triggered instantly")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error executing instant soft keyboard trigger", e)
+        }
     }
 
     private fun flattenTree(node: AccessibilityNodeInfo, list: MutableList<AccessibilityNodeInfo>) {
