@@ -73,4 +73,6 @@ dependencies {
     implementation(libs.androidx.appcompat)
     implementation(libs.material)
     implementation(libs.androidx.constraintlayout)
+
+    testImplementation("junit:junit:4.13.2")
 }
