@@ -62,14 +62,50 @@ class ChatVisitStateMachineTest {
         stateMachine.markActionTriggered()
         assertEquals(ChatVisitState.DONE_FOR_THIS_VISIT, stateMachine.currentState)
 
-        // 2. Back out to Chat List (isChatScreen = false)
-        val resLeave = stateMachine.evaluate(isChatScreen = false, conversationTitle = null, currentTimeNano = t0 + 100)
+        // 2. Back out to Chat List (isChatScreen = false) with reason
+        val resLeave = stateMachine.evaluate(isChatScreen = false, conversationTitle = null, currentTimeNano = t0 + 100, notInChatReason = "dialogs_recycler_detected")
         assertEquals(VisitCheckResult.DoNothing, resLeave)
         assertEquals(ChatVisitState.NOT_IN_CHAT, stateMachine.currentState)
 
-        // 3. Re-enter Chat Alice (or any chat)
+        // 3. Re-enter Chat Alice (same title, fresh visit after NOT_IN_CHAT)
         val resReenter = stateMachine.evaluate(isChatScreen = true, conversationTitle = "Alice", currentTimeNano = t0 + 200)
         assertTrue(resReenter is VisitCheckResult.ShouldSearchAndTrigger)
+        assertEquals(ChatVisitState.WAITING_FOR_INPUT, stateMachine.currentState)
+    }
+
+    @Test
+    fun testNonTelegramPackageReset() {
+        val t0 = 1000L
+        // 1. Enter Chat Alice and complete action
+        stateMachine.evaluate(isChatScreen = true, conversationTitle = "Alice", currentTimeNano = t0)
+        stateMachine.markActionTriggered()
+        assertEquals(ChatVisitState.DONE_FOR_THIS_VISIT, stateMachine.currentState)
+
+        // 2. User switches to Home Screen or non-Telegram package
+        stateMachine.resetToNotInChat(reason = "non_telegram_package (pkg=com.android.launcher)")
+        assertEquals(ChatVisitState.NOT_IN_CHAT, stateMachine.currentState)
+
+        // 3. Return to Telegram in the same chat (Alice)
+        val resReenter = stateMachine.evaluate(isChatScreen = true, conversationTitle = "Alice", currentTimeNano = t0 + 500)
+        assertTrue(resReenter is VisitCheckResult.ShouldSearchAndTrigger)
+        assertEquals(ChatVisitState.WAITING_FOR_INPUT, stateMachine.currentState)
+    }
+
+    @Test
+    fun testInputNodeAbsentCausesNotInChatReset() {
+        val t0 = 1000L
+        // 1. Enter Chat Alice
+        stateMachine.evaluate(isChatScreen = true, conversationTitle = "Alice", currentTimeNano = t0)
+        stateMachine.markActionTriggered()
+
+        // 2. User opens Settings or Contact Info screen inside Telegram (no input node)
+        val resSettings = stateMachine.evaluate(isChatScreen = false, conversationTitle = null, currentTimeNano = t0 + 100, notInChatReason = "input_node_absent")
+        assertEquals(VisitCheckResult.DoNothing, resSettings)
+        assertEquals(ChatVisitState.NOT_IN_CHAT, stateMachine.currentState)
+
+        // 3. Return to Chat Alice
+        val resReturn = stateMachine.evaluate(isChatScreen = true, conversationTitle = "Alice", currentTimeNano = t0 + 200)
+        assertTrue(resReturn is VisitCheckResult.ShouldSearchAndTrigger)
         assertEquals(ChatVisitState.WAITING_FOR_INPUT, stateMachine.currentState)
     }
 
