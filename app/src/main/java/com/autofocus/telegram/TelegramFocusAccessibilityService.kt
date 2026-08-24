@@ -46,6 +46,12 @@ class TelegramFocusAccessibilityService : AccessibilityService() {
     val stateMachine = ChatVisitStateMachine(maxRetryDurationNano = RETRY_DURATION_NANO)
     private val mainHandler = Handler(Looper.getMainLooper())
     private var isRetryRunnableScheduled = false
+    private var retryAttemptCounter = 0
+
+    override fun onServiceConnected() {
+        super.onServiceConnected()
+        Log.i(TAG, "=== TelegramFocusAccessibilityService CONNECTED ===")
+    }
 
     private val retryRunnable = object : Runnable {
         override fun run() {
@@ -74,6 +80,10 @@ class TelegramFocusAccessibilityService : AccessibilityService() {
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event == null) return
+
+        val eventTypeName = AccessibilityEvent.eventTypeToString(event.eventType)
+        val rawPackage = event.packageName?.toString() ?: "null"
+        Log.d(TAG, "[EVENT RECEIVED] type=$eventTypeName package=$rawPackage")
 
         val packageName = event.packageName?.toString() ?: return
         if (packageName !in MainActivity.TELEGRAM_PACKAGES) return
@@ -104,10 +114,39 @@ class TelegramFocusAccessibilityService : AccessibilityService() {
     }
 
     private fun processAndTrigger(rootNode: AccessibilityNodeInfo, t0: Long, triggerSource: String) {
-        val isChat = isChatConversationScreenFast(rootNode)
-        val title = if (isChat) extractConversationTitle(rootNode) else null
+        val isChat = try {
+            isChatConversationScreenFast(rootNode)
+        } catch (e: Exception) {
+            Log.e(TAG, "Exception in isChatConversationScreenFast", e)
+            false
+        }
 
-        val evalResult = stateMachine.evaluate(isChat, title, t0)
+        val title = if (isChat) {
+            try {
+                extractConversationTitle(rootNode)
+            } catch (e: Exception) {
+                Log.e(TAG, "Exception in extractConversationTitle", e)
+                null
+            }
+        } else null
+
+        val prevState = stateMachine.currentState
+        val evalResult = try {
+            stateMachine.evaluate(isChat, title, t0)
+        } catch (e: Exception) {
+            Log.e(TAG, "Exception in stateMachine.evaluate", e)
+            VisitCheckResult.DoNothing
+        }
+
+        if (prevState != ChatVisitState.WAITING_FOR_INPUT && stateMachine.currentState == ChatVisitState.WAITING_FOR_INPUT) {
+            retryAttemptCounter = 0
+            Log.i(TAG, "chat screen detected, entering WAITING_FOR_INPUT (title='$title')")
+        }
+
+        if (stateMachine.currentState == ChatVisitState.WAITING_FOR_INPUT) {
+            retryAttemptCounter++
+            Log.d(TAG, "retry attempt $retryAttemptCounter (source=$triggerSource, elapsed=${(t0 - stateMachine.visitStartTimeNano) / 1_000_000}ms)")
+        }
 
         if (evalResult is VisitCheckResult.DoNothing) {
             if (stateMachine.currentState != ChatVisitState.WAITING_FOR_INPUT) {
@@ -119,22 +158,44 @@ class TelegramFocusAccessibilityService : AccessibilityService() {
 
         // State is WAITING_FOR_INPUT and attempt permitted
         val t1 = System.nanoTime()
-        val (inputNode, searchMethod) = findMessageInputNodeFast(rootNode)
+        val (inputNode, searchMethod) = try {
+            findMessageInputNodeFast(rootNode)
+        } catch (e: Exception) {
+            Log.e(TAG, "Exception in findMessageInputNodeFast", e)
+            Pair(null, "error")
+        }
         val t2 = System.nanoTime()
 
         if (inputNode == null) {
-            Log.d(TAG, "[$triggerSource] WAITING_FOR_INPUT: Chat screen detected, but no editable input node found yet. State remains ${stateMachine.currentState}")
+            Log.i(TAG, "node search result: NOT FOUND (method=$searchMethod)")
             scheduleNextRetryIfNeeded()
             return
         }
+
+        val nodeClassName = inputNode.className?.toString() ?: "unknown"
+        Log.i(TAG, "node search result: FOUND ($nodeClassName, method=$searchMethod)")
 
         // Found input node! Perform actions and mark transition to DONE_FOR_THIS_VISIT
         stateMachine.markActionTriggered()
         mainHandler.removeCallbacks(retryRunnable)
         isRetryRunnableScheduled = false
 
-        val focusSuccess = inputNode.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
-        val clickSuccess = inputNode.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+        val focusSuccess = try {
+            inputNode.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+        } catch (e: Exception) {
+            Log.e(TAG, "Exception executing ACTION_FOCUS", e)
+            false
+        }
+        Log.i(TAG, "ACTION_FOCUS returned: $focusSuccess")
+
+        val clickSuccess = try {
+            inputNode.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+        } catch (e: Exception) {
+            Log.e(TAG, "Exception executing ACTION_CLICK", e)
+            false
+        }
+        Log.i(TAG, "ACTION_CLICK returned: $clickSuccess")
+
         val t3 = System.nanoTime()
 
         triggerSoftKeyboard()
@@ -142,8 +203,15 @@ class TelegramFocusAccessibilityService : AccessibilityService() {
 
         // Immediate gesture fallback if needed
         val inputBounds = Rect()
-        inputNode.getBoundsInScreen(inputBounds)
+        try {
+            inputNode.getBoundsInScreen(inputBounds)
+        } catch (e: Exception) {
+            Log.e(TAG, "Exception getting bounds in screen for input node", e)
+        }
+
+        Log.i(TAG, "gesture fallback invoked (bounds=$inputBounds)")
         val gestureDispatched = dispatchTapGesture(inputBounds)
+        Log.i(TAG, "gesture fallback result: $gestureDispatched")
 
         @Suppress("DEPRECATION")
         inputNode.recycle()
@@ -325,10 +393,11 @@ class TelegramFocusAccessibilityService : AccessibilityService() {
         try {
             @Suppress("DEPRECATION")
             val imm = getSystemService(INPUT_METHOD_SERVICE) as? InputMethodManager
+            Log.i(TAG, "showSoftInput invoked (InputMethodManager available: ${imm != null})")
             @Suppress("DEPRECATION")
             imm?.toggleSoftInput(InputMethodManager.SHOW_FORCED, InputMethodManager.HIDE_IMPLICIT_ONLY)
         } catch (e: Exception) {
-            Log.e(TAG, "Error executing soft keyboard trigger", e)
+            Log.e(TAG, "Exception during showSoftInput / toggleSoftInput invocation", e)
         }
     }
 
