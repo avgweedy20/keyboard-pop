@@ -17,7 +17,6 @@ class TelegramFocusAccessibilityService : AccessibilityService() {
     companion object {
         private const val TAG = "TelegramFocusService"
         const val RETRY_DURATION_NANO = 2_000_000_000L // 2.0s bounded window for slow devices
-        private const val RETRY_INTERVAL_MS = 35L // Fallback retry check interval
 
         @Volatile
         var lastResponseTimeMs: Double? = null
@@ -32,14 +31,6 @@ class TelegramFocusAccessibilityService : AccessibilityService() {
             "org.telegram.messenger.web:id/chat_text_input",
             "org.telegram.messenger.web:id/message_edit_text",
             "org.telegram.messenger.web:id/chat_activity_enter_view"
-        )
-
-        // Known toolbar / title bar resource IDs in Telegram
-        private val TITLE_RESOURCE_IDS = listOf(
-            "org.telegram.messenger:id/action_bar_title",
-            "org.telegram.messenger:id/title",
-            "org.telegram.messenger.web:id/action_bar_title",
-            "org.telegram.messenger.web:id/title"
         )
     }
 
@@ -68,7 +59,7 @@ class TelegramFocusAccessibilityService : AccessibilityService() {
             }
 
             try {
-                processAndTrigger(rootNode, t0, triggerSource = "timer")
+                processAndTrigger(rootNode, t0, triggerSource = "timer", packageName = "org.telegram.messenger")
             } catch (e: Exception) {
                 Log.e(TAG, "Error during fallback timer check", e)
             } finally {
@@ -99,7 +90,7 @@ class TelegramFocusAccessibilityService : AccessibilityService() {
         val rootNode = rootInActiveWindow ?: return
 
         try {
-            processAndTrigger(rootNode, t0, triggerSource = "event")
+            processAndTrigger(rootNode, t0, triggerSource = "event", packageName = packageName)
         } catch (e: Exception) {
             Log.e(TAG, "Error processing accessibility event safely", e)
         } finally {
@@ -120,15 +111,25 @@ class TelegramFocusAccessibilityService : AccessibilityService() {
         isRetryRunnableScheduled = false
     }
 
-    private fun processAndTrigger(rootNode: AccessibilityNodeInfo, t0: Long, triggerSource: String) {
+    private fun getRetryDelayMs(attempt: Int): Long {
+        return when {
+            attempt <= 5 -> 8L    // Front-loaded fast retries (~8ms)
+            attempt <= 10 -> 16L  // Frame-level retries (~16ms)
+            else -> 35L           // Back off to 35ms within 2.0s ceiling
+        }
+    }
+
+    private fun processAndTrigger(rootNode: AccessibilityNodeInfo, t0: Long, triggerSource: String, packageName: String) {
+        val t0Nano = t0
+
         val hasDialogsRecycler = try {
-            isDialogsRecyclerPresent(rootNode)
+            isDialogsRecyclerPresent(rootNode, packageName)
         } catch (e: Exception) {
             Log.e(TAG, "Exception checking dialogs recycler", e)
             false
         }
 
-        val t1 = System.nanoTime()
+        val t3Nano = System.nanoTime()
         val (inputNode, searchMethod) = if (!hasDialogsRecycler) {
             try {
                 findMessageInputNodeFast(rootNode)
@@ -139,7 +140,8 @@ class TelegramFocusAccessibilityService : AccessibilityService() {
         } else {
             Pair(null, "dialogs_recycler_present")
         }
-        val t2 = System.nanoTime()
+        val t4Nano = System.nanoTime()
+        val t1Nano = t4Nano // Chat screen confirmed after recycler check and input node search
 
         val (isChat, notInChatReason) = when {
             hasDialogsRecycler -> Pair(false, "dialogs_recycler_detected")
@@ -149,7 +151,7 @@ class TelegramFocusAccessibilityService : AccessibilityService() {
 
         val title = if (isChat) {
             try {
-                extractConversationTitle(rootNode)
+                extractConversationTitle(rootNode, packageName)
             } catch (e: Exception) {
                 Log.e(TAG, "Exception in extractConversationTitle", e)
                 null
@@ -158,11 +160,12 @@ class TelegramFocusAccessibilityService : AccessibilityService() {
 
         val prevState = stateMachine.currentState
         val evalResult = try {
-            stateMachine.evaluate(isChat, title, t0, notInChatReason = notInChatReason)
+            stateMachine.evaluate(isChat, title, t0Nano, notInChatReason = notInChatReason)
         } catch (e: Exception) {
             Log.e(TAG, "Exception in stateMachine.evaluate", e)
             VisitCheckResult.DoNothing
         }
+        val t2Nano = System.nanoTime()
 
         if (prevState != ChatVisitState.WAITING_FOR_INPUT && stateMachine.currentState == ChatVisitState.WAITING_FOR_INPUT) {
             retryAttemptCounter = 0
@@ -171,7 +174,7 @@ class TelegramFocusAccessibilityService : AccessibilityService() {
 
         if (stateMachine.currentState == ChatVisitState.WAITING_FOR_INPUT) {
             retryAttemptCounter++
-            Log.d(TAG, "retry attempt $retryAttemptCounter (source=$triggerSource, elapsed=${(t0 - stateMachine.visitStartTimeNano) / 1_000_000}ms)")
+            Log.d(TAG, "retry attempt $retryAttemptCounter (source=$triggerSource, elapsed=${(t0Nano - stateMachine.visitStartTimeNano) / 1_000_000}ms)")
         }
 
         if (evalResult is VisitCheckResult.DoNothing) {
@@ -206,7 +209,6 @@ class TelegramFocusAccessibilityService : AccessibilityService() {
             Log.e(TAG, "Exception executing ACTION_FOCUS", e)
             false
         }
-        Log.i(TAG, "ACTION_FOCUS returned: $focusSuccess")
 
         val clickSuccess = try {
             inputNode.performAction(AccessibilityNodeInfo.ACTION_CLICK)
@@ -214,14 +216,9 @@ class TelegramFocusAccessibilityService : AccessibilityService() {
             Log.e(TAG, "Exception executing ACTION_CLICK", e)
             false
         }
-        Log.i(TAG, "ACTION_CLICK returned: $clickSuccess")
-
-        val t3 = System.nanoTime()
 
         triggerSoftKeyboard()
-        val t4 = System.nanoTime()
 
-        // Immediate gesture fallback if needed
         val inputBounds = Rect()
         try {
             inputNode.getBoundsInScreen(inputBounds)
@@ -229,23 +226,29 @@ class TelegramFocusAccessibilityService : AccessibilityService() {
             Log.e(TAG, "Exception getting bounds in screen for input node", e)
         }
 
-        Log.i(TAG, "gesture fallback invoked (bounds=$inputBounds)")
         val gestureDispatched = dispatchTapGesture(inputBounds)
-        Log.i(TAG, "gesture fallback result: $gestureDispatched")
+        val t5Nano = System.nanoTime()
 
         @Suppress("DEPRECATION")
         inputNode.recycle()
 
-        val detectionAndDispatchMs = (t4 - t0) / 1_000_000.0
-        lastResponseTimeMs = detectionAndDispatchMs
+        val t6Nano = System.nanoTime()
+
+        val d10 = (t1Nano - t0Nano) / 1_000_000.0
+        val d21 = (t2Nano - t1Nano) / 1_000_000.0
+        val d43 = (t4Nano - t3Nano) / 1_000_000.0
+        val d52 = (t5Nano - t2Nano) / 1_000_000.0
+        val d65 = (t6Nano - t5Nano) / 1_000_000.0
+        val totalMs = (t6Nano - t0Nano) / 1_000_000.0
+
+        lastResponseTimeMs = totalMs
 
         Log.i(
             TAG,
             String.format(
                 Locale.US,
-                "[TIMING] source=%s method=%s | OUR_DETECTION_AND_DISPATCH=%.2fms (detect=%.2fms, find=%.2fms, action=%.2fms, kb=%.2fms) | focusOk=%b clickOk=%b gestureSent=%b state=%s title='%s'",
-                triggerSource, searchMethod, detectionAndDispatchMs,
-                (t1 - t0) / 1_000_000.0, (t2 - t1) / 1_000_000.0, (t3 - t2) / 1_000_000.0, (t4 - t3) / 1_000_000.0,
+                "[TIMING] source=%s tier=%s | T1-T0=%.2fms (chat check), T2-T1=%.2fms (fsm eval), T4-T3=%.2fms (node search), T5-T2=%.2fms (dispatch), T6-T5=%.2fms (completion) | TOTAL=%.2fms | focusOk=%b clickOk=%b gestureSent=%b state=%s title='%s'",
+                triggerSource, searchMethod, d10, d21, d43, d52, d65, totalMs,
                 focusSuccess, clickSuccess, gestureDispatched, stateMachine.currentState, title
             )
         )
@@ -254,12 +257,24 @@ class TelegramFocusAccessibilityService : AccessibilityService() {
     private fun scheduleNextRetryIfNeeded() {
         if (stateMachine.currentState == ChatVisitState.WAITING_FOR_INPUT && !isRetryRunnableScheduled) {
             isRetryRunnableScheduled = true
-            mainHandler.postDelayed(retryRunnable, RETRY_INTERVAL_MS)
+            val delayMs = getRetryDelayMs(retryAttemptCounter)
+            mainHandler.postDelayed(retryRunnable, delayMs)
         }
     }
 
-    private fun extractConversationTitle(rootNode: AccessibilityNodeInfo): String? {
-        for (resId in TITLE_RESOURCE_IDS) {
+    private fun extractConversationTitle(rootNode: AccessibilityNodeInfo, packageName: String?): String? {
+        val titleIds = if (packageName == "org.telegram.messenger.web") {
+            listOf(
+                "org.telegram.messenger.web:id/action_bar_title",
+                "org.telegram.messenger.web:id/title"
+            )
+        } else {
+            listOf(
+                "org.telegram.messenger:id/action_bar_title",
+                "org.telegram.messenger:id/title"
+            )
+        }
+        for (resId in titleIds) {
             val nodes = rootNode.findAccessibilityNodeInfosByViewId(resId)
             if (!nodes.isNullOrEmpty()) {
                 val titleText = nodes.firstOrNull()?.text?.toString()
@@ -278,25 +293,20 @@ class TelegramFocusAccessibilityService : AccessibilityService() {
     /**
      * Fast check whether the dialogs recycler (chat list) is present.
      */
-    private fun isDialogsRecyclerPresent(rootNode: AccessibilityNodeInfo): Boolean {
-        val chatListNodes = rootNode.findAccessibilityNodeInfosByViewId("org.telegram.messenger:id/dialogs_recycler")
-        if (!chatListNodes.isNullOrEmpty()) {
-            for (node in chatListNodes) {
+    private fun isDialogsRecyclerPresent(rootNode: AccessibilityNodeInfo, packageName: String?): Boolean {
+        val resId = if (packageName == "org.telegram.messenger.web") {
+            "org.telegram.messenger.web:id/dialogs_recycler"
+        } else {
+            "org.telegram.messenger:id/dialogs_recycler"
+        }
+        val nodes = rootNode.findAccessibilityNodeInfosByViewId(resId)
+        if (!nodes.isNullOrEmpty()) {
+            for (node in nodes) {
                 @Suppress("DEPRECATION")
                 node.recycle()
             }
             return true
         }
-
-        val chatListNodesWeb = rootNode.findAccessibilityNodeInfosByViewId("org.telegram.messenger.web:id/dialogs_recycler")
-        if (!chatListNodesWeb.isNullOrEmpty()) {
-            for (node in chatListNodesWeb) {
-                @Suppress("DEPRECATION")
-                node.recycle()
-            }
-            return true
-        }
-
         return false
     }
 
@@ -412,7 +422,7 @@ class TelegramFocusAccessibilityService : AccessibilityService() {
         try {
             @Suppress("DEPRECATION")
             val imm = getSystemService(INPUT_METHOD_SERVICE) as? InputMethodManager
-            Log.i(TAG, "showSoftInput invoked (InputMethodManager available: ${imm != null})")
+            Log.i(TAG, "showSoftInput / toggleSoftInput invoked (InputMethodManager available: ${imm != null})")
             @Suppress("DEPRECATION")
             imm?.toggleSoftInput(InputMethodManager.SHOW_FORCED, InputMethodManager.HIDE_IMPLICIT_ONLY)
         } catch (e: Exception) {
