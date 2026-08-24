@@ -85,8 +85,15 @@ class TelegramFocusAccessibilityService : AccessibilityService() {
         val rawPackage = event.packageName?.toString() ?: "null"
         Log.d(TAG, "[EVENT RECEIVED] type=$eventTypeName package=$rawPackage")
 
-        val packageName = event.packageName?.toString() ?: return
-        if (packageName !in MainActivity.TELEGRAM_PACKAGES) return
+        val packageName = event.packageName?.toString()
+        if (packageName == null || packageName !in MainActivity.TELEGRAM_PACKAGES) {
+            if (stateMachine.currentState != ChatVisitState.NOT_IN_CHAT) {
+                stateMachine.resetToNotInChat(reason = "non_telegram_package (pkg=$rawPackage)")
+                mainHandler.removeCallbacks(retryRunnable)
+                isRetryRunnableScheduled = false
+            }
+            return
+        }
 
         val t0 = System.nanoTime()
         val rootNode = rootInActiveWindow ?: return
@@ -114,11 +121,30 @@ class TelegramFocusAccessibilityService : AccessibilityService() {
     }
 
     private fun processAndTrigger(rootNode: AccessibilityNodeInfo, t0: Long, triggerSource: String) {
-        val isChat = try {
-            isChatConversationScreenFast(rootNode)
+        val hasDialogsRecycler = try {
+            isDialogsRecyclerPresent(rootNode)
         } catch (e: Exception) {
-            Log.e(TAG, "Exception in isChatConversationScreenFast", e)
+            Log.e(TAG, "Exception checking dialogs recycler", e)
             false
+        }
+
+        val t1 = System.nanoTime()
+        val (inputNode, searchMethod) = if (!hasDialogsRecycler) {
+            try {
+                findMessageInputNodeFast(rootNode)
+            } catch (e: Exception) {
+                Log.e(TAG, "Exception in findMessageInputNodeFast", e)
+                Pair(null, "error")
+            }
+        } else {
+            Pair(null, "dialogs_recycler_present")
+        }
+        val t2 = System.nanoTime()
+
+        val (isChat, notInChatReason) = when {
+            hasDialogsRecycler -> Pair(false, "dialogs_recycler_detected")
+            inputNode == null -> Pair(false, "input_node_absent")
+            else -> Pair(true, "")
         }
 
         val title = if (isChat) {
@@ -132,7 +158,7 @@ class TelegramFocusAccessibilityService : AccessibilityService() {
 
         val prevState = stateMachine.currentState
         val evalResult = try {
-            stateMachine.evaluate(isChat, title, t0)
+            stateMachine.evaluate(isChat, title, t0, notInChatReason = notInChatReason)
         } catch (e: Exception) {
             Log.e(TAG, "Exception in stateMachine.evaluate", e)
             VisitCheckResult.DoNothing
@@ -149,22 +175,16 @@ class TelegramFocusAccessibilityService : AccessibilityService() {
         }
 
         if (evalResult is VisitCheckResult.DoNothing) {
+            inputNode?.let {
+                @Suppress("DEPRECATION")
+                it.recycle()
+            }
             if (stateMachine.currentState != ChatVisitState.WAITING_FOR_INPUT) {
                 mainHandler.removeCallbacks(retryRunnable)
                 isRetryRunnableScheduled = false
             }
             return
         }
-
-        // State is WAITING_FOR_INPUT and attempt permitted
-        val t1 = System.nanoTime()
-        val (inputNode, searchMethod) = try {
-            findMessageInputNodeFast(rootNode)
-        } catch (e: Exception) {
-            Log.e(TAG, "Exception in findMessageInputNodeFast", e)
-            Pair(null, "error")
-        }
-        val t2 = System.nanoTime()
 
         if (inputNode == null) {
             Log.i(TAG, "node search result: NOT FOUND (method=$searchMethod)")
@@ -256,17 +276,16 @@ class TelegramFocusAccessibilityService : AccessibilityService() {
     }
 
     /**
-     * Fast check whether the root node represents a chat screen.
-     * Rejects chat list view instantly if chat list recycler is found.
+     * Fast check whether the dialogs recycler (chat list) is present.
      */
-    private fun isChatConversationScreenFast(rootNode: AccessibilityNodeInfo): Boolean {
+    private fun isDialogsRecyclerPresent(rootNode: AccessibilityNodeInfo): Boolean {
         val chatListNodes = rootNode.findAccessibilityNodeInfosByViewId("org.telegram.messenger:id/dialogs_recycler")
         if (!chatListNodes.isNullOrEmpty()) {
             for (node in chatListNodes) {
                 @Suppress("DEPRECATION")
                 node.recycle()
             }
-            return false
+            return true
         }
 
         val chatListNodesWeb = rootNode.findAccessibilityNodeInfosByViewId("org.telegram.messenger.web:id/dialogs_recycler")
@@ -275,10 +294,10 @@ class TelegramFocusAccessibilityService : AccessibilityService() {
                 @Suppress("DEPRECATION")
                 node.recycle()
             }
-            return false
+            return true
         }
 
-        return true
+        return false
     }
 
     /**

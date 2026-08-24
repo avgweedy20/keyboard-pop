@@ -35,16 +35,18 @@ class ChatVisitStateMachine(
      * @param isChatScreen whether the root node represents a chat screen
      * @param conversationTitle optional extracted title (e.g. contact/group name)
      * @param currentTimeNano current timestamp in nanoseconds
+     * @param notInChatReason reason string if isChatScreen is false
      * @return VisitCheckResult indicating whether to search for input and trigger action
      */
     fun evaluate(
         isChatScreen: Boolean,
         conversationTitle: String?,
-        currentTimeNano: Long
+        currentTimeNano: Long,
+        notInChatReason: String = "not_chat_screen"
     ): VisitCheckResult {
         if (!isChatScreen) {
             if (currentState != ChatVisitState.NOT_IN_CHAT) {
-                resetToNotInChat()
+                resetToNotInChat(notInChatReason)
             }
             return VisitCheckResult.DoNothing
         }
@@ -63,9 +65,10 @@ class ChatVisitStateMachine(
         }
 
         if (isNewVisit) {
-            currentState = ChatVisitState.WAITING_FOR_INPUT
+            val prevTitle = activeConversationTitle
             activeConversationTitle = conversationTitle
             visitStartTimeNano = currentTimeNano
+            transitionTo(ChatVisitState.WAITING_FOR_INPUT, reason = "new_visit (prevTitle='$prevTitle', newTitle='$conversationTitle')")
             return VisitCheckResult.ShouldSearchAndTrigger
         }
 
@@ -90,7 +93,7 @@ class ChatVisitStateMachine(
      */
     fun markActionTriggered() {
         if (currentState == ChatVisitState.WAITING_FOR_INPUT) {
-            currentState = ChatVisitState.DONE_FOR_THIS_VISIT
+            transitionTo(ChatVisitState.DONE_FOR_THIS_VISIT, reason = "action_triggered")
         }
     }
 
@@ -100,16 +103,30 @@ class ChatVisitStateMachine(
     fun checkTimeout(currentTimeNano: Long): Boolean {
         if (currentState == ChatVisitState.WAITING_FOR_INPUT) {
             if (currentTimeNano - visitStartTimeNano > maxRetryDurationNano) {
-                currentState = ChatVisitState.ABANDONED
+                transitionTo(ChatVisitState.ABANDONED, reason = "retry_timeout_exceeded")
                 return true
             }
         }
         return false
     }
 
-    fun resetToNotInChat() {
-        currentState = ChatVisitState.NOT_IN_CHAT
+    fun resetToNotInChat(reason: String = "manual_reset") {
+        val prevTitle = activeConversationTitle
         activeConversationTitle = null
         visitStartTimeNano = 0L
+        if (currentState != ChatVisitState.NOT_IN_CHAT) {
+            transitionTo(ChatVisitState.NOT_IN_CHAT, reason = "$reason (prevTitle='$prevTitle')")
+        }
+    }
+
+    private fun transitionTo(newState: ChatVisitState, reason: String) {
+        val oldState = currentState
+        if (oldState != newState) {
+            currentState = newState
+            android.util.Log.i(
+                "ChatVisitStateMachine",
+                "[STATE CHANGE] $oldState -> $newState (reason=$reason)"
+            )
+        }
     }
 }
