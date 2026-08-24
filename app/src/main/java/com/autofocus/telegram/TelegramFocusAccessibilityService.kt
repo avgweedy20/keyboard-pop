@@ -1,7 +1,11 @@
 package com.autofocus.telegram
 
 import android.accessibilityservice.AccessibilityService
+import android.accessibilityservice.GestureDescription
+import android.graphics.Path
 import android.graphics.Rect
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
@@ -12,7 +16,8 @@ class TelegramFocusAccessibilityService : AccessibilityService() {
 
     companion object {
         private const val TAG = "TelegramFocusService"
-        private const val MAX_RETRY_DURATION_NANO = 500_000_000L // 500 ms retry window
+        const val RETRY_DURATION_NANO = 2_000_000_000L // 2.0s bounded window for slow devices
+        private const val RETRY_INTERVAL_MS = 35L // Fallback retry check interval
 
         @Volatile
         var lastResponseTimeMs: Double? = null
@@ -28,11 +33,44 @@ class TelegramFocusAccessibilityService : AccessibilityService() {
             "org.telegram.messenger.web:id/message_edit_text",
             "org.telegram.messenger.web:id/chat_activity_enter_view"
         )
+
+        // Known toolbar / title bar resource IDs in Telegram
+        private val TITLE_RESOURCE_IDS = listOf(
+            "org.telegram.messenger:id/action_bar_title",
+            "org.telegram.messenger:id/title",
+            "org.telegram.messenger.web:id/action_bar_title",
+            "org.telegram.messenger.web:id/title"
+        )
     }
 
-    private var lastHandledChatSignature: String? = null
-    private var activeChatSignature: String? = null
-    private var activeChatStartTimeNano: Long = 0L
+    val stateMachine = ChatVisitStateMachine(maxRetryDurationNano = RETRY_DURATION_NANO)
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private var isRetryRunnableScheduled = false
+
+    private val retryRunnable = object : Runnable {
+        override fun run() {
+            isRetryRunnableScheduled = false
+            if (stateMachine.currentState != ChatVisitState.WAITING_FOR_INPUT) {
+                return
+            }
+
+            val t0 = System.nanoTime()
+            val rootNode = rootInActiveWindow
+            if (rootNode == null) {
+                scheduleNextRetryIfNeeded()
+                return
+            }
+
+            try {
+                processAndTrigger(rootNode, t0, triggerSource = "timer")
+            } catch (e: Exception) {
+                Log.e(TAG, "Error during fallback timer check", e)
+            } finally {
+                @Suppress("DEPRECATION")
+                rootNode.recycle()
+            }
+        }
+    }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event == null) return
@@ -41,11 +79,10 @@ class TelegramFocusAccessibilityService : AccessibilityService() {
         if (packageName !in MainActivity.TELEGRAM_PACKAGES) return
 
         val t0 = System.nanoTime()
-
         val rootNode = rootInActiveWindow ?: return
 
         try {
-            processWindowEvent(rootNode, t0)
+            processAndTrigger(rootNode, t0, triggerSource = "event")
         } catch (e: Exception) {
             Log.e(TAG, "Error processing accessibility event safely", e)
         } finally {
@@ -56,85 +93,98 @@ class TelegramFocusAccessibilityService : AccessibilityService() {
 
     override fun onInterrupt() {
         Log.i(TAG, "Service interrupted")
+        mainHandler.removeCallbacks(retryRunnable)
+        isRetryRunnableScheduled = false
     }
 
-    private fun processWindowEvent(rootNode: AccessibilityNodeInfo, t0: Long) {
-        // Fast check if current window is chat screen
-        val isChat = isChatConversationScreenFast(rootNode)
-        val t1 = System.nanoTime()
+    override fun onDestroy() {
+        super.onDestroy()
+        mainHandler.removeCallbacks(retryRunnable)
+        isRetryRunnableScheduled = false
+    }
 
-        if (!isChat) {
-            if (lastHandledChatSignature != null || activeChatSignature != null) {
-                lastHandledChatSignature = null
-                activeChatSignature = null
-                activeChatStartTimeNano = 0L
+    private fun processAndTrigger(rootNode: AccessibilityNodeInfo, t0: Long, triggerSource: String) {
+        val isChat = isChatConversationScreenFast(rootNode)
+        val title = if (isChat) extractConversationTitle(rootNode) else null
+
+        val evalResult = stateMachine.evaluate(isChat, title, t0)
+
+        if (evalResult is VisitCheckResult.DoNothing) {
+            if (stateMachine.currentState != ChatVisitState.WAITING_FOR_INPUT) {
+                mainHandler.removeCallbacks(retryRunnable)
+                isRetryRunnableScheduled = false
             }
             return
         }
 
-        // Search for editable input node using fast-path caching
+        // State is WAITING_FOR_INPUT and attempt permitted
+        val t1 = System.nanoTime()
         val (inputNode, searchMethod) = findMessageInputNodeFast(rootNode)
         val t2 = System.nanoTime()
 
         if (inputNode == null) {
-            Log.d(TAG, "Chat screen signature detected, but no editable input node found.")
+            Log.d(TAG, "[$triggerSource] WAITING_FOR_INPUT: Chat screen detected, but no editable input node found yet. State remains ${stateMachine.currentState}")
+            scheduleNextRetryIfNeeded()
             return
         }
 
-        // Generate dynamic chat signature incorporating the input node & layout identity
-        val currentSignature = generateDynamicChatSignature(rootNode, inputNode)
+        // Found input node! Perform actions and mark transition to DONE_FOR_THIS_VISIT
+        stateMachine.markActionTriggered()
+        mainHandler.removeCallbacks(retryRunnable)
+        isRetryRunnableScheduled = false
 
-        // Check if this chat signature is already handled
-        if (currentSignature == lastHandledChatSignature) {
-            @Suppress("DEPRECATION")
-            inputNode.recycle()
-            return
-        }
-
-        // Check or initialize window retry state
-        if (activeChatSignature != currentSignature) {
-            activeChatSignature = currentSignature
-            activeChatStartTimeNano = t0
-        } else {
-            if (t0 - activeChatStartTimeNano > MAX_RETRY_DURATION_NANO) {
-                @Suppress("DEPRECATION")
-                inputNode.recycle()
-                return
-            }
-        }
-
-        lastHandledChatSignature = currentSignature
-
-        // Fire click and focus actions on the actual editable node
         val focusSuccess = inputNode.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
         val clickSuccess = inputNode.performAction(AccessibilityNodeInfo.ACTION_CLICK)
         val t3 = System.nanoTime()
 
-        // Fire soft keyboard trigger immediately without artificial delays
         triggerSoftKeyboard()
         val t4 = System.nanoTime()
+
+        // Immediate gesture fallback if needed
+        val inputBounds = Rect()
+        inputNode.getBoundsInScreen(inputBounds)
+        val gestureDispatched = dispatchTapGesture(inputBounds)
 
         @Suppress("DEPRECATION")
         inputNode.recycle()
 
-        val totalElapsedMs = (t4 - t0) / 1_000_000.0
-        lastResponseTimeMs = totalElapsedMs
+        val detectionAndDispatchMs = (t4 - t0) / 1_000_000.0
+        lastResponseTimeMs = detectionAndDispatchMs
 
-        if (BuildConfig.DEBUG) {
-            val detectMs = (t1 - t0) / 1_000_000.0
-            val findMs = (t2 - t1) / 1_000_000.0
-            val focusMs = (t3 - t2) / 1_000_000.0
-            val keyboardMs = (t4 - t3) / 1_000_000.0
-
-            Log.d(
-                TAG,
-                String.format(
-                    Locale.US,
-                    "[TIMING] method=%s | total=%.2fms (detect=%.2fms, find=%.2fms, focus=%.2fms, kb=%.2fms) | focusOk=%b clickOk=%b",
-                    searchMethod, totalElapsedMs, detectMs, findMs, focusMs, keyboardMs, focusSuccess, clickSuccess
-                )
+        Log.i(
+            TAG,
+            String.format(
+                Locale.US,
+                "[TIMING] source=%s method=%s | OUR_DETECTION_AND_DISPATCH=%.2fms (detect=%.2fms, find=%.2fms, action=%.2fms, kb=%.2fms) | focusOk=%b clickOk=%b gestureSent=%b state=%s title='%s'",
+                triggerSource, searchMethod, detectionAndDispatchMs,
+                (t1 - t0) / 1_000_000.0, (t2 - t1) / 1_000_000.0, (t3 - t2) / 1_000_000.0, (t4 - t3) / 1_000_000.0,
+                focusSuccess, clickSuccess, gestureDispatched, stateMachine.currentState, title
             )
+        )
+    }
+
+    private fun scheduleNextRetryIfNeeded() {
+        if (stateMachine.currentState == ChatVisitState.WAITING_FOR_INPUT && !isRetryRunnableScheduled) {
+            isRetryRunnableScheduled = true
+            mainHandler.postDelayed(retryRunnable, RETRY_INTERVAL_MS)
         }
+    }
+
+    private fun extractConversationTitle(rootNode: AccessibilityNodeInfo): String? {
+        for (resId in TITLE_RESOURCE_IDS) {
+            val nodes = rootNode.findAccessibilityNodeInfosByViewId(resId)
+            if (!nodes.isNullOrEmpty()) {
+                val titleText = nodes.firstOrNull()?.text?.toString()
+                for (node in nodes) {
+                    @Suppress("DEPRECATION")
+                    node.recycle()
+                }
+                if (!titleText.isNullOrBlank()) {
+                    return titleText
+                }
+            }
+        }
+        return null
     }
 
     /**
@@ -210,7 +260,7 @@ class TelegramFocusAccessibilityService : AccessibilityService() {
             }
         }
 
-        // 3. Early-exit tree search (stops traversal immediately on first matching bottom EditText)
+        // 3. Early-exit tree search
         val displayBounds = Rect()
         rootNode.getBoundsInScreen(displayBounds)
         val screenHeight = displayBounds.height().toFloat().takeIf { it > 0 } ?: 2000f
@@ -226,17 +276,12 @@ class TelegramFocusAccessibilityService : AccessibilityService() {
         return Pair(null, "none")
     }
 
-    /**
-     * Verifies if node is an editable EditText; if node is a container (e.g. ChatActivityEnterView),
-     * searches inside child nodes for the actual editable EditText child.
-     */
     private fun extractEditableNode(node: AccessibilityNodeInfo): AccessibilityNodeInfo? {
         if (node.isEditable || node.className?.toString()?.contains("EditText", ignoreCase = true) == true) {
             @Suppress("DEPRECATION")
             return AccessibilityNodeInfo.obtain(node)
         }
 
-        // Search children inside container node
         for (i in 0 until node.childCount) {
             val child = node.getChild(i) ?: continue
             val result = extractEditableNode(child)
@@ -250,9 +295,6 @@ class TelegramFocusAccessibilityService : AccessibilityService() {
         return null
     }
 
-    /**
-     * Recursive DFS that returns immediately upon finding the first editable bottom-screen node.
-     */
     private fun searchTreeEarlyExit(node: AccessibilityNodeInfo, minY: Float): AccessibilityNodeInfo? {
         val className = node.className?.toString() ?: ""
         val bounds = Rect()
@@ -279,22 +321,6 @@ class TelegramFocusAccessibilityService : AccessibilityService() {
         return null
     }
 
-    /**
-     * Generates a dynamic chat signature incorporating the input node's bounds and window structure,
-     * ensuring unique signature detection across chat screen transitions.
-     */
-    private fun generateDynamicChatSignature(rootNode: AccessibilityNodeInfo, inputNode: AccessibilityNodeInfo): String {
-        val rootBounds = Rect()
-        rootNode.getBoundsInScreen(rootBounds)
-
-        val inputBounds = Rect()
-        inputNode.getBoundsInScreen(inputBounds)
-
-        val nodeText = inputNode.text?.toString() ?: ""
-
-        return "chat_${rootNode.windowId}_${inputBounds.left}_${inputBounds.top}_${inputNode.childCount}_${nodeText.hashCode()}"
-    }
-
     private fun triggerSoftKeyboard() {
         try {
             @Suppress("DEPRECATION")
@@ -303,6 +329,27 @@ class TelegramFocusAccessibilityService : AccessibilityService() {
             imm?.toggleSoftInput(InputMethodManager.SHOW_FORCED, InputMethodManager.HIDE_IMPLICIT_ONLY)
         } catch (e: Exception) {
             Log.e(TAG, "Error executing soft keyboard trigger", e)
+        }
+    }
+
+    private fun dispatchTapGesture(bounds: Rect): Boolean {
+        if (bounds.isEmpty) return false
+
+        val centerX = bounds.centerX().toFloat()
+        val centerY = bounds.centerY().toFloat()
+
+        val path = Path().apply {
+            moveTo(centerX, centerY)
+        }
+
+        val stroke = GestureDescription.StrokeDescription(path, 0, 50)
+        val gesture = GestureDescription.Builder().addStroke(stroke).build()
+
+        return try {
+            dispatchGesture(gesture, null, null)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error dispatching synthetic tap gesture", e)
+            false
         }
     }
 }
