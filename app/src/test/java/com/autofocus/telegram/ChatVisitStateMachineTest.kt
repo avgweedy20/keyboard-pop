@@ -124,6 +124,76 @@ class ChatVisitStateMachineTest {
     }
 
     @Test
+    fun testClickDetectedThenScreenConfirmedFlow() {
+        val tClick = 1_000_000_000L
+        stateMachine.onChatListClicked(tClick)
+        assertEquals(ChatVisitState.PENDING_CHAT_OPEN, stateMachine.currentState)
+        assertEquals(tClick, stateMachine.visitStartTimeNano)
+
+        // Screen confirmed arrival after 50ms
+        val tScreen = tClick + 50_000_000L
+        val res = stateMachine.evaluate(isChatScreen = true, conversationTitle = "Alice", currentTimeNano = tScreen)
+
+        assertTrue(res is VisitCheckResult.ShouldSearchAndTrigger)
+        assertEquals(ChatVisitState.WAITING_FOR_INPUT, stateMachine.currentState)
+        assertEquals("Alice", stateMachine.activeConversationTitle)
+
+        stateMachine.markActionTriggered()
+        assertEquals(ChatVisitState.DONE_FOR_THIS_VISIT, stateMachine.currentState)
+    }
+
+    @Test
+    fun testClickDetectedThenNoScreenFollowsCleanAbandon() {
+        val tClick = 1_000_000_000L
+        stateMachine.onChatListClicked(tClick)
+        assertEquals(ChatVisitState.PENDING_CHAT_OPEN, stateMachine.currentState)
+
+        // Non-chat event within timeout (e.g. at 200ms)
+        val tEval1 = tClick + 200_000_000L
+        val res1 = stateMachine.evaluate(isChatScreen = false, conversationTitle = null, currentTimeNano = tEval1)
+        assertEquals(VisitCheckResult.DoNothing, res1)
+        assertEquals(ChatVisitState.PENDING_CHAT_OPEN, stateMachine.currentState)
+
+        // Exceed timeout (400ms) -> e.g. at 450ms
+        val tEval2 = tClick + 450_000_000L
+        val res2 = stateMachine.evaluate(isChatScreen = false, conversationTitle = null, currentTimeNano = tEval2)
+        assertEquals(VisitCheckResult.DoNothing, res2)
+        assertEquals(ChatVisitState.NOT_IN_CHAT, stateMachine.currentState)
+    }
+
+    @Test
+    fun testRapidRetapOnlyLatestClickTreatedAsPending() {
+        val tClick1 = 1_000_000_000L
+        stateMachine.onChatListClicked(tClick1)
+        assertEquals(ChatVisitState.PENDING_CHAT_OPEN, stateMachine.currentState)
+        assertEquals(tClick1, stateMachine.visitStartTimeNano)
+
+        // User taps a different chat 100ms later
+        val tClick2 = tClick1 + 100_000_000L
+        stateMachine.onChatListClicked(tClick2)
+        assertEquals(ChatVisitState.PENDING_CHAT_OPEN, stateMachine.currentState)
+        assertEquals(tClick2, stateMachine.visitStartTimeNano)
+
+        // 350ms after second click (450ms after first click), screen arrives for Bob
+        val tScreen = tClick2 + 350_000_000L
+        val res = stateMachine.evaluate(isChatScreen = true, conversationTitle = "Bob", currentTimeNano = tScreen)
+        assertTrue(res is VisitCheckResult.ShouldSearchAndTrigger)
+        assertEquals(ChatVisitState.WAITING_FOR_INPUT, stateMachine.currentState)
+        assertEquals("Bob", stateMachine.activeConversationTitle)
+    }
+
+    @Test
+    fun testEarlyInputFoundInPendingStateTriggersActionDirectly() {
+        val tClick = 1_000_000_000L
+        stateMachine.onChatListClicked(tClick)
+        assertEquals(ChatVisitState.PENDING_CHAT_OPEN, stateMachine.currentState)
+
+        // Input node found during transition while still in PENDING_CHAT_OPEN
+        stateMachine.markActionTriggered()
+        assertEquals(ChatVisitState.DONE_FOR_THIS_VISIT, stateMachine.currentState)
+    }
+
+    @Test
     fun testExhaustingRetryWindowMovesToAbandoned() {
         val t0 = 1_000_000_000L
         // Enter chat screen where input node is slow to appear

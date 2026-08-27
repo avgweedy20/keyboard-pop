@@ -2,6 +2,7 @@ package com.autofocus.telegram
 
 enum class ChatVisitState {
     NOT_IN_CHAT,
+    PENDING_CHAT_OPEN,
     WAITING_FOR_INPUT,
     DONE_FOR_THIS_VISIT,
     ABANDONED
@@ -13,10 +14,12 @@ sealed class VisitCheckResult {
 }
 
 class ChatVisitStateMachine(
-    val maxRetryDurationNano: Long = DEFAULT_MAX_RETRY_DURATION_NANO
+    val maxRetryDurationNano: Long = DEFAULT_MAX_RETRY_DURATION_NANO,
+    val pendingTimeoutNano: Long = DEFAULT_PENDING_TIMEOUT_NANO
 ) {
     companion object {
         const val DEFAULT_MAX_RETRY_DURATION_NANO = 2_000_000_000L // 2 seconds
+        const val DEFAULT_PENDING_TIMEOUT_NANO = 400_000_000L // 400 ms
     }
 
     var currentState: ChatVisitState = ChatVisitState.NOT_IN_CHAT
@@ -27,6 +30,24 @@ class ChatVisitStateMachine(
 
     var visitStartTimeNano: Long = 0L
         private set
+
+    /**
+     * Called when a chat-list click event is detected in dialogs_recycler.
+     * Immediately enters PENDING_CHAT_OPEN state.
+     */
+    fun onChatListClicked(currentTimeNano: Long) {
+        val prevTitle = activeConversationTitle
+        activeConversationTitle = null
+        visitStartTimeNano = currentTimeNano
+        if (currentState == ChatVisitState.PENDING_CHAT_OPEN) {
+            android.util.Log.i(
+                "ChatVisitStateMachine",
+                "[STATE CHANGE] PENDING_CHAT_OPEN -> PENDING_CHAT_OPEN (reason=rapid_retap_click)"
+            )
+        } else {
+            transitionTo(ChatVisitState.PENDING_CHAT_OPEN, reason = "chat_list_clicked (prevTitle='$prevTitle')")
+        }
+    }
 
     /**
      * Called on accessibility events or scheduled retries.
@@ -44,6 +65,22 @@ class ChatVisitStateMachine(
         currentTimeNano: Long,
         notInChatReason: String = "not_chat_screen"
     ): VisitCheckResult {
+        if (currentState == ChatVisitState.PENDING_CHAT_OPEN) {
+            if (currentTimeNano - visitStartTimeNano > pendingTimeoutNano) {
+                resetToNotInChat("pending_timeout_exceeded")
+                return VisitCheckResult.DoNothing
+            }
+            if (isChatScreen) {
+                activeConversationTitle = conversationTitle
+                transitionTo(
+                    ChatVisitState.WAITING_FOR_INPUT,
+                    reason = "chat_screen_confirmed (title='$conversationTitle')"
+                )
+                return VisitCheckResult.ShouldSearchAndTrigger
+            }
+            return VisitCheckResult.DoNothing
+        }
+
         if (!isChatScreen) {
             if (currentState != ChatVisitState.NOT_IN_CHAT) {
                 resetToNotInChat(notInChatReason)
@@ -62,6 +99,7 @@ class ChatVisitStateMachine(
                         activeConversationTitle != null &&
                         conversationTitle != activeConversationTitle
             }
+            ChatVisitState.PENDING_CHAT_OPEN -> false // Handled above
         }
 
         if (isNewVisit) {
@@ -77,9 +115,10 @@ class ChatVisitStateMachine(
             ChatVisitState.DONE_FOR_THIS_VISIT -> VisitCheckResult.DoNothing
             ChatVisitState.ABANDONED -> VisitCheckResult.DoNothing
             ChatVisitState.NOT_IN_CHAT -> VisitCheckResult.DoNothing // Handled above
+            ChatVisitState.PENDING_CHAT_OPEN -> VisitCheckResult.DoNothing // Handled above
             ChatVisitState.WAITING_FOR_INPUT -> {
                 if (currentTimeNano - visitStartTimeNano > maxRetryDurationNano) {
-                    currentState = ChatVisitState.ABANDONED
+                    transitionTo(ChatVisitState.ABANDONED, reason = "retry_timeout_exceeded")
                     VisitCheckResult.DoNothing
                 } else {
                     VisitCheckResult.ShouldSearchAndTrigger
@@ -92,7 +131,7 @@ class ChatVisitStateMachine(
      * Call when the input node is successfully found and the focus/keyboard action has been sent.
      */
     fun markActionTriggered() {
-        if (currentState == ChatVisitState.WAITING_FOR_INPUT) {
+        if (currentState == ChatVisitState.WAITING_FOR_INPUT || currentState == ChatVisitState.PENDING_CHAT_OPEN) {
             transitionTo(ChatVisitState.DONE_FOR_THIS_VISIT, reason = "action_triggered")
         }
     }
@@ -101,7 +140,12 @@ class ChatVisitStateMachine(
      * Force timeout check for scheduled fallback timers.
      */
     fun checkTimeout(currentTimeNano: Long): Boolean {
-        if (currentState == ChatVisitState.WAITING_FOR_INPUT) {
+        if (currentState == ChatVisitState.PENDING_CHAT_OPEN) {
+            if (currentTimeNano - visitStartTimeNano > pendingTimeoutNano) {
+                resetToNotInChat("pending_timeout_exceeded")
+                return true
+            }
+        } else if (currentState == ChatVisitState.WAITING_FOR_INPUT) {
             if (currentTimeNano - visitStartTimeNano > maxRetryDurationNano) {
                 transitionTo(ChatVisitState.ABANDONED, reason = "retry_timeout_exceeded")
                 return true
