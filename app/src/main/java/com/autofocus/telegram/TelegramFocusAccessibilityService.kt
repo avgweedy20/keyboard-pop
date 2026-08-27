@@ -134,7 +134,7 @@ class TelegramFocusAccessibilityService : AccessibilityService() {
         } else {
             "org.telegram.messenger:id/dialogs_recycler"
         }
-        var sourceNode: AccessibilityNodeInfo? = event.source ?: return true
+        var sourceNode: AccessibilityNodeInfo? = event.source ?: return false
         while (sourceNode != null) {
             if (sourceNode.viewIdResourceName == targetResId) {
                 @Suppress("DEPRECATION")
@@ -310,16 +310,17 @@ class TelegramFocusAccessibilityService : AccessibilityService() {
 
         lastResponseTimeMs = totalMsFromClick
 
-        // Architectural NOTE on IME Animation Suppression:
-        // Direct WindowInsetsController manipulation to suppress keyboard slide-in animation is restricted by Android OS
-        // security boundaries because an AccessibilityService operates outside Telegram's window process and does not own its Window.
-        // Thus, zero-animation keyboard perception is achieved by dispatching IME focus requests mid-transition during PENDING_CHAT_OPEN.
+        // Architectural NOTE on IME Animation & Platform Constraints:
+        // Direct WindowInsetsController manipulation to suppress keyboard slide-in animation or attaching external TYPE_ACCESSIBILITY_OVERLAY
+        // windows to pre-hold IME focus is restricted by Android OS security boundaries (external accessibility services do not own Telegram's Window token).
+        // Therefore, maximum performance and perceived speed is achieved by starting node search immediately during PENDING_CHAT_OPEN (T-1)
+        // and using a single clean ACTION_FOCUS trigger sequence without concurrent gesture noise.
 
         Log.i(
             TAG,
             String.format(
                 Locale.US,
-                "[TIMING] source=%s tier=%s | T(-1) headStart=%.2fms, T1-T0=%.2fms (chat check), T2-T1=%.2fms (fsm eval), T4-T3=%.2fms (node search), T5-T2=%.2fms (dispatch), T6-T5=%.2fms (completion) | TOTAL_FROM_CLICK=%.2fms (TOTAL_FROM_T0=%.2fms) | focusOk=%b clickOk=%b gestureSent=%b state=%s title='%s'",
+                "[TIMING] source=%s tier=%s | T(-1) headStart=%.2fms, T1-T0=%.2fms (chat check), T2-T1=%.2fms (fsm eval), T4-T3=%.2fms (node search), T5-T2=%.2fms (dispatch), T6-T5=%.2fms (completion) | T(-1)->T6=%.2fms (T0->T6=%.2fms) | focusOk=%b clickOk=%b gestureSent=%b state=%s title='%s'",
                 triggerSource, searchMethod, headStartMs, d10, d21, d43, d52, d65, totalMsFromClick, totalMsFromT0,
                 focusSuccess, clickSuccess, gestureDispatched, stateMachine.currentState, title
             )
